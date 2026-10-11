@@ -1,581 +1,484 @@
-import 'dart:convert';
+import 'dart:math';
+
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const TaskMasterApp());
+  runApp(const SubwayApp());
 }
 
-class AppTheme {
-  static const Color background = Color(0xFF0D1117);
-  static const Color surface = Color(0xFF161B22);
-  static const Color surfaceAlt = Color(0xFF21262D);
-  static const Color border = Color(0xFF30363D);
-  static const Color primary = Color(0xFF1F6FEB);
-  static const Color primaryLight = Color(0xFF58A6FF);
-  static const Color success = Color(0xFF2EA043);
-  static const Color danger = Color(0xFFCF222E);
-  static const Color warning = Color(0xFFD29922);
-  static const Color textPrimary = Color(0xFFE6EDF3);
-  static const Color textMuted = Color(0xFF8B949E);
-
-  static ThemeData get dark => ThemeData(
-        useMaterial3: true,
-        brightness: Brightness.dark,
-        scaffoldBackgroundColor: background,
-        colorScheme: const ColorScheme.dark(
-          primary: primary,
-          secondary: primaryLight,
-          surface: surface,
-          error: danger,
-          onPrimary: Colors.white,
-          onSurface: textPrimary,
-        ),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: background,
-          elevation: 0,
-          centerTitle: true,
-          titleTextStyle: TextStyle(
-            color: textPrimary,
-            fontSize: 20,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        floatingActionButtonTheme: const FloatingActionButtonThemeData(
-          backgroundColor: primary,
-          foregroundColor: Colors.white,
-        ),
-        inputDecorationTheme: InputDecorationTheme(
-          filled: true,
-          fillColor: surfaceAlt,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: const BorderSide(color: border),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: const BorderSide(color: border),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: const BorderSide(color: primaryLight, width: 1.5),
-          ),
-        ),
-      );
-}
-
-class Task {
-  final String id;
-  String title;
-  bool done;
-  final DateTime createdAt;
-
-  Task({
-    required this.id,
-    required this.title,
-    this.done = false,
-    required this.createdAt,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'done': done,
-        'createdAt': createdAt.toIso8601String(),
-      };
-
-  factory Task.fromJson(Map<String, dynamic> json) => Task(
-        id: json['id'] as String,
-        title: json['title'] as String,
-        done: json['done'] as bool? ?? false,
-        createdAt: DateTime.parse(json['createdAt'] as String),
-      );
-}
-
-class TaskMasterApp extends StatelessWidget {
-  const TaskMasterApp({super.key});
+class SubwayApp extends StatelessWidget {
+  const SubwayApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'subway_runner',
+      title: 'Subway Runner',
       debugShowCheckedModeBanner: false,
-      theme: AppTheme.dark,
-      home: const TaskHomePage(),
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: const Color(0xFF0E0E1A),
+      ),
+      home: const GameScreen(),
     );
   }
 }
 
-enum TaskFilter { all, active, completed }
+enum ObstacleKind { low, high, train, coin }
 
-class TaskHomePage extends StatefulWidget {
-  const TaskHomePage({super.key});
+class Obstacle {
+  double x;
+  final int lane;
+  final ObstacleKind kind;
+  bool consumed;
 
-  @override
-  State<TaskHomePage> createState() => _TaskHomePageState();
+  Obstacle({
+    required this.x,
+    required this.lane,
+    required this.kind,
+    this.consumed = false,
+  });
+
+  double get width {
+    switch (kind) {
+      case ObstacleKind.train:
+        return 100;
+      case ObstacleKind.coin:
+        return 28;
+      case ObstacleKind.low:
+      case ObstacleKind.high:
+        return 60;
+    }
+  }
+
+  double get height {
+    switch (kind) {
+      case ObstacleKind.train:
+        return 120;
+      case ObstacleKind.coin:
+        return 28;
+      case ObstacleKind.low:
+        return 30;
+      case ObstacleKind.high:
+        return 85;
+    }
+  }
 }
 
-class _TaskHomePageState extends State<TaskHomePage>
-    with SingleTickerProviderStateMixin {
-  static const String _storageKey = 'klencod_tasks_v1';
+enum GameStatus { menu, playing, gameOver }
 
-  final List<Task> _tasks = [];
-  final TextEditingController _searchController = TextEditingController();
-  TaskFilter _filter = TaskFilter.all;
-  String _searchQuery = '';
-  bool _loading = true;
-  late AnimationController _fadeController;
+class GameScreen extends StatefulWidget {
+  const GameScreen({super.key});
+
+  @override
+  State<GameScreen> createState() => _GameScreenState();
+}
+
+class _GameScreenState extends State<GameScreen>
+    with SingleTickerProviderStateMixin {
+  late final Ticker _ticker;
+  Duration _lastTick = Duration.zero;
+
+  final Random _rng = Random();
+
+  int _lane = 1;
+  double _visualLane = 1;
+  double _jumpOffset = 0;
+  double _jumpVelocity = 0;
+  bool _isJumping = false;
+  bool _isSliding = false;
+  double _slideTimer = 0;
+
+  final List<Obstacle> _obstacles = [];
+  double _speed = 380;
+  double _spawnTimer = 0.9;
+
+  double _score = 0;
+  int _coinCount = 0;
+  int _highScore = 0;
+
+  GameStatus _status = GameStatus.menu;
+
+  double _screenW = 0;
+  double _screenH = 0;
+  double _laneHeight = 0;
+  double _trackTop = 0;
+
+  static const double _playerW = 46;
+  static const double _playerH = 92;
+  static const double _playerX = 96;
+  static const double _gravity = 2600;
+  static const double _jumpVelocity0 = -960;
+  static const double _slideDuration = 0.6;
 
   @override
   void initState() {
     super.initState();
-    _fadeController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 300),
-    );
-    _loadTasks();
+    _ticker = createTicker(_onTick)..start();
+    _loadHighScore();
+  }
+
+  Future<void> _loadHighScore() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() => _highScore = prefs.getInt('subway_hs') ?? 0);
+  }
+
+  Future<void> _saveHighScore(int v) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('subway_hs', v);
   }
 
   @override
   void dispose() {
-    _fadeController.dispose();
-    _searchController.dispose();
+    _ticker.dispose();
     super.dispose();
   }
 
-  Future<void> _loadTasks() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final data = prefs.getString(_storageKey);
-      if (data != null && data.isNotEmpty) {
-        final list = jsonDecode(data) as List<dynamic>;
-        _tasks.clear();
-        _tasks.addAll(list.map((e) => Task.fromJson(e as Map<String, dynamic>)));
+  void _onTick(Duration elapsed) {
+    final dt = _lastTick == Duration.zero
+        ? 0.0
+        : (elapsed - _lastTick).inMicroseconds / 1e6;
+    _lastTick = elapsed;
+
+    if (_status != GameStatus.playing) return;
+    if (dt <= 0 || dt > 0.1) return;
+
+    _update(dt);
+    setState(() {});
+  }
+
+  void _update(double dt) {
+    _speed = 380 + _score * 0.3;
+
+    _visualLane += (_lane - _visualLane) * (dt * 14).clamp(0.0, 1.0);
+
+    if (_isJumping) {
+      _jumpOffset += _jumpVelocity * dt;
+      _jumpVelocity += _gravity * dt;
+      if (_jumpOffset >= 0) {
+        _jumpOffset = 0;
+        _jumpVelocity = 0;
+        _isJumping = false;
       }
-    } catch (_) {}
-    setState(() => _loading = false);
-    _fadeController.forward();
-  }
-
-  Future<void> _saveTasks() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final data = jsonEncode(_tasks.map((t) => t.toJson()).toList());
-      await prefs.setString(_storageKey, data);
-    } catch (_) {}
-  }
-
-  void _addTask(String title) {
-    final trimmed = title.trim();
-    if (trimmed.isEmpty) return;
-    setState(() {
-      _tasks.insert(
-        0,
-        Task(
-          id: DateTime.now().microsecondsSinceEpoch.toString(),
-          title: trimmed,
-          createdAt: DateTime.now(),
-        ),
-      );
-    });
-    _saveTasks();
-    HapticFeedback.lightImpact();
-    _showSnack('تمت إضافة المهمة', success: true);
-  }
-
-  void _toggleTask(Task task) {
-    setState(() => task.done = !task.done);
-    _saveTasks();
-    HapticFeedback.selectionClick();
-  }
-
-  void _deleteTask(Task task) {
-    final index = _tasks.indexOf(task);
-    if (index == -1) return;
-    setState(() => _tasks.removeAt(index));
-    _saveTasks();
-    _showSnack(
-      'تم حذف المهمة',
-      actionLabel: 'تراجع',
-      onAction: () {
-        setState(() => _tasks.insert(index, task));
-        _saveTasks();
-      },
-    );
-  }
-
-  void _clearCompleted() {
-    final completed = _tasks.where((t) => t.done).toList();
-    if (completed.isEmpty) {
-      _showSnack('لا توجد مهام مكتملة');
-      return;
     }
-    showDialog(
-      context: context,
-      builder: (ctx) => _buildConfirmDialog(
-        ctx,
-        title: 'حذف المهام المكتملة',
-        message: 'سيتم حذف ${completed.length} مهمة مكتملة. لا يمكن التراجع.',
-        onConfirm: () {
-          setState(() => _tasks.removeWhere((t) => t.done));
-          _saveTasks();
-          Navigator.pop(ctx);
-          _showSnack('تم حذف ${completed.length} مهمة', success: true);
+
+    if (_isSliding) {
+      _slideTimer -= dt;
+      if (_slideTimer <= 0) {
+        _isSliding = false;
+      }
+    }
+
+    _spawnTimer -= dt;
+    if (_spawnTimer <= 0) {
+      _spawnTimer = (1.2 - _score * 0.0006).clamp(0.45, 1.2);
+      _spawnPattern();
+    }
+
+    for (final o in _obstacles) {
+      o.x -= _speed * dt;
+    }
+    _obstacles.removeWhere((o) => o.x + o.width < -30);
+
+    _score += _speed * dt * 0.05;
+
+    _resolveCollisions();
+  }
+
+  void _spawnPattern() {
+    final lane = _rng.nextInt(3);
+    final roll = _rng.nextDouble();
+
+    if (roll < 0.38) {
+      final count = 3 + _rng.nextInt(3);
+      for (int i = 0; i < count; i++) {
+        _obstacles.add(Obstacle(
+          x: _screenW + 30 + i * 42,
+          lane: lane,
+          kind: ObstacleKind.coin,
+        ));
+      }
+    } else if (roll < 0.72) {
+      _obstacles.add(Obstacle(
+        x: _screenW + 30,
+        lane: lane,
+        kind: _rng.nextBool() ? ObstacleKind.low : ObstacleKind.high,
+      ));
+    } else {
+      _obstacles.add(Obstacle(
+        x: _screenW + 30,
+        lane: lane,
+        kind: ObstacleKind.train,
+      ));
+      if (_rng.nextBool()) {
+        final safeLane = (lane + 1 + _rng.nextInt(2)) % 3;
+        for (int i = 0; i < 4; i++) {
+          _obstacles.add(Obstacle(
+            x: _screenW + 60 + i * 42,
+            lane: safeLane,
+            kind: ObstacleKind.coin,
+          ));
+        }
+      }
+    }
+  }
+
+  void _resolveCollisions() {
+    final pRect = _playerRect();
+    final playerLeft = _playerX - _playerW / 2;
+    final playerRight = _playerX + _playerW / 2;
+
+    for (final o in _obstacles) {
+      if (o.consumed) continue;
+      if (o.lane != _lane) continue;
+
+      final oRect = _obstacleRect(o);
+      final xOverlap = playerRight > oRect.left && playerLeft < oRect.right;
+      if (!xOverlap) continue;
+
+      if (o.kind == ObstacleKind.coin) {
+        o.consumed = true;
+        _coinCount++;
+        _score += 10;
+        continue;
+      }
+
+      if (o.kind == ObstacleKind.train) {
+        _endGame();
+        return;
+      }
+
+      if (pRect.overlaps(oRect)) {
+        _endGame();
+        return;
+      }
+    }
+  }
+
+  Rect _playerRect() {
+    final laneTop = _trackTop + _visualLane * _laneHeight;
+    final laneBottom = laneTop + _laneHeight;
+    final h = _isSliding ? _playerH * 0.45 : _playerH;
+    final top = laneBottom - h + _jumpOffset;
+    return Rect.fromLTWH(_playerX - _playerW / 2, top, _playerW, h);
+  }
+
+  Rect _obstacleRect(Obstacle o) {
+    final laneTop = _trackTop + o.lane * _laneHeight;
+    final laneBottom = laneTop + _laneHeight;
+
+    switch (o.kind) {
+      case ObstacleKind.low:
+        return Rect.fromLTWH(o.x, laneBottom - o.height, o.width, o.height);
+      case ObstacleKind.high:
+        return Rect.fromLTWH(o.x, laneTop, o.width, o.height);
+      case ObstacleKind.train:
+        return Rect.fromLTWH(o.x, laneTop + 8, o.width, _laneHeight - 16);
+      case ObstacleKind.coin:
+        return Rect.fromLTWH(
+          o.x,
+          laneTop + _laneHeight / 2 - o.height / 2,
+          o.width,
+          o.height,
+        );
+    }
+  }
+
+  void _startGame() {
+    _lane = 1;
+    _visualLane = 1;
+    _jumpOffset = 0;
+    _jumpVelocity = 0;
+    _isJumping = false;
+    _isSliding = false;
+    _slideTimer = 0;
+    _obstacles.clear();
+    _speed = 380;
+    _spawnTimer = 0.9;
+    _score = 0;
+    _coinCount = 0;
+    _status = GameStatus.playing;
+    _lastTick = Duration.zero;
+    setState(() {});
+  }
+
+  void _endGame() {
+    _status = GameStatus.gameOver;
+    final s = _score.toInt();
+    if (s > _highScore) {
+      _highScore = s;
+      _saveHighScore(s);
+    }
+    setState(() {});
+  }
+
+  void _moveLane(int dir) {
+    if (_status != GameStatus.playing) return;
+    final next = (_lane + dir).clamp(0, 2);
+    if (next != _lane) {
+      setState(() => _lane = next);
+    }
+  }
+
+  void _tryJump() {
+    if (_status != GameStatus.playing) return;
+    if (_isJumping) return;
+    setState(() {
+      _isJumping = true;
+      _jumpVelocity = _jumpVelocity0;
+      _isSliding = false;
+    });
+  }
+
+  void _trySlide() {
+    if (_status != GameStatus.playing) return;
+    if (_isJumping) return;
+    setState(() {
+      _isSliding = true;
+      _slideTimer = _slideDuration;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          _screenW = constraints.maxWidth;
+          _screenH = constraints.maxHeight;
+          _trackTop = _screenH * 0.12;
+          _laneHeight = (_screenH * 0.78) / 3;
+
+          return GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onHorizontalDragEnd: (d) {
+              final v = d.velocity.pixelsPerSecond.dx;
+              if (v > 350) {
+                _moveLane(1);
+              } else if (v < -350) {
+                _moveLane(-1);
+              }
+            },
+            onVerticalDragEnd: (d) {
+              final v = d.velocity.pixelsPerSecond.dy;
+              if (v < -350) {
+                _tryJump();
+              } else if (v > 350) {
+                _trySlide();
+              }
+            },
+            onTap: _status == GameStatus.playing ? null : _startGame,
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: CustomPaint(
+                    painter: _GamePainter(
+                      trackTop: _trackTop,
+                      laneHeight: _laneHeight,
+                      screenW: _screenW,
+                      obstacles: _obstacles,
+                      playerRect: _playerRect(),
+                      speed: _speed,
+                    ),
+                  ),
+                ),
+                if (_status == GameStatus.playing) _buildHud(),
+                if (_status == GameStatus.menu) _buildMenu(),
+                if (_status == GameStatus.gameOver) _buildGameOver(),
+              ],
+            ),
+          );
         },
       ),
     );
   }
 
-  void _showSnack(String message,
-      {String? actionLabel, VoidCallback? onAction, bool success = false}) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).clearSnackBars();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Row(
-          children: [
-            Icon(
-              success ? Icons.check_circle_rounded : Icons.info_outline_rounded,
-              color: success ? AppTheme.success : AppTheme.textPrimary,
-              size: 20,
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                message,
-                style: const TextStyle(color: AppTheme.textPrimary),
-              ),
-            ),
-          ],
-        ),
-        backgroundColor: AppTheme.surfaceAlt,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        margin: const EdgeInsets.all(16),
-        duration: const Duration(seconds: 3),
-        action: actionLabel != null
-            ? SnackBarAction(
-                label: actionLabel,
-                textColor: AppTheme.primaryLight,
-                onPressed: onAction ?? () {},
-              )
-            : null,
-      ),
-    );
-  }
-
-  Widget _buildConfirmDialog(
-    BuildContext ctx, {
-    required String title,
-    required String message,
-    required VoidCallback onConfirm,
-  }) {
-    return AlertDialog(
-      backgroundColor: AppTheme.surface,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-      title: Text(title, style: const TextStyle(color: AppTheme.textPrimary)),
-      content: Text(message, style: const TextStyle(color: AppTheme.textMuted)),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(ctx),
-          child: const Text('إلغاء',
-              style: TextStyle(color: AppTheme.textMuted)),
-        ),
-        TextButton(
-          onPressed: onConfirm,
-          child: const Text('تأكيد',
-              style: TextStyle(
-                  color: AppTheme.danger, fontWeight: FontWeight.bold)),
-        ),
-      ],
-    );
-  }
-
-  void _openAddDialog() {
-    final controller = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppTheme.surface,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        title: Row(
-          children: const [
-            Icon(Icons.add_task_rounded, color: AppTheme.primaryLight),
-            SizedBox(width: 10),
-            Text('مهمة جديدة',
-                style: TextStyle(color: AppTheme.textPrimary)),
-          ],
-        ),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          textInputAction: TextInputAction.done,
-          onSubmitted: (v) {
-            _addTask(v);
-            Navigator.pop(ctx);
-          },
-          decoration: const InputDecoration(
-            hintText: 'اكتب المهمة...',
-            prefixIcon: Icon(Icons.edit_rounded),
-          ),
-          style: const TextStyle(color: AppTheme.textPrimary),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('إلغاء',
-                style: TextStyle(color: AppTheme.textMuted)),
-          ),
-          FilledButton(
-            onPressed: () {
-              _addTask(controller.text);
-              Navigator.pop(ctx);
-            },
-            style: FilledButton.styleFrom(backgroundColor: AppTheme.primary),
-            child: const Text('إضافة'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  List<Task> get _visibleTasks {
-    Iterable<Task> result = _tasks;
-    if (_filter == TaskFilter.active) {
-      result = result.where((t) => !t.done);
-    } else if (_filter == TaskFilter.completed) {
-      result = result.where((t) => t.done);
-    }
-    if (_searchQuery.isNotEmpty) {
-      final q = _searchQuery.toLowerCase();
-      result = result.where((t) => t.title.toLowerCase().contains(q));
-    }
-    return result.toList();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_loading) {
-      return const Scaffold(
-        body: Center(
-          child: CircularProgressIndicator(color: AppTheme.primaryLight),
-        ),
-      );
-    }
-
-    final visible = _visibleTasks;
-    final total = _tasks.length;
-    final completed = _tasks.where((t) => t.done).length;
-    final active = total - completed;
-    final progress = total == 0 ? 0.0 : completed / total;
-
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('subway_runner'),
-        actions: [
-          if (completed > 0)
-            IconButton(
-              tooltip: 'حذف المكتملة',
-              icon: const Icon(Icons.delete_sweep_rounded),
-              onPressed: _clearCompleted,
-            ),
-        ],
-      ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _openAddDialog,
-        icon: const Icon(Icons.add_rounded),
-        label: const Text('مهمة جديدة',
-            style: TextStyle(fontWeight: FontWeight.bold)),
-      ),
-      body: Column(
+  Widget _buildHud() {
+    return Positioned(
+      top: 40,
+      left: 20,
+      right: 20,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          _buildHeader(total, completed, active, progress),
-          _buildSearchBar(),
-          _buildFilters(total, active, completed),
-          Expanded(
-            child: visible.isEmpty
-                ? _buildEmptyState()
-                : _buildTaskList(visible),
-          ),
+          _pill('النقاط ${_score.toInt()}'),
+          _pill('العملات $_coinCount'),
         ],
       ),
     );
   }
 
-  Widget _buildHeader(int total, int completed, int active, double progress) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-      child: Container(
-        padding: const EdgeInsets.all(18),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            colors: [Color(0xFF1F6FEB), Color(0xFF0D419D)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-          borderRadius: BorderRadius.circular(20),
-          boxShadow: [
-            BoxShadow(
-              color: AppTheme.primary.withOpacity(0.3),
-              blurRadius: 16,
-              offset: const Offset(0, 6),
-            ),
-          ],
+  Widget _pill(String text) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.55),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.bold,
+          fontSize: 16,
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.task_alt_rounded,
-                    color: Colors.white, size: 28),
-                const SizedBox(width: 10),
-                Text(
-                  total == 0 ? 'لا توجد مهام بعد' : 'مهامك',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
+      ),
+    );
+  }
+
+  Widget _buildMenu() {
+    return Positioned.fill(
+      child: Container(
+        color: Colors.black.withOpacity(0.55),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'SUBWAY RUN',
+                style: TextStyle(
+                  fontSize: 44,
+                  fontWeight: FontWeight.w900,
+                  color: Colors.amber,
+                  letterSpacing: 2,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'اسحب يمين/يسار لتغيير المسار',
+                style: TextStyle(color: Colors.white70, fontSize: 14),
+              ),
+              const Text(
+                'اسحب أعلى للقفز، أسفل للانزلاق',
+                style: TextStyle(color: Colors.white70, fontSize: 14),
+              ),
+              const SizedBox(height: 32),
+              ElevatedButton(
+                onPressed: _startGame,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.amber,
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 42,
+                    vertical: 16,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(30),
                   ),
                 ),
-              ],
-            ),
-            const SizedBox(height: 14),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                _statChip('الإجمالي', total, Colors.white),
-                _statChip('نشطة', active, AppTheme.warning),
-                _statChip('مكتملة', completed, AppTheme.success),
-              ],
-            ),
-            const SizedBox(height: 16),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: TweenAnimationBuilder<double>(
-                tween: Tween(begin: 0, end: progress),
-                duration: const Duration(milliseconds: 600),
-                builder: (_, value, __) => LinearProgressIndicator(
-                  value: value,
-                  minHeight: 8,
-                  backgroundColor: Colors.white24,
-                  valueColor:
-                      const AlwaysStoppedAnimation<Color>(Colors.white),
+                child: const Text(
+                  'ابدأ اللعب',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                 ),
               ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              '${(progress * 100).toStringAsFixed(0)}% إنجاز',
-              style: const TextStyle(color: Colors.white70, fontSize: 12),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _statChip(String label, int value, Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.15),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Column(
-        children: [
-          Text(
-            '$value',
-            style: TextStyle(
-              color: color,
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          Text(
-            label,
-            style: const TextStyle(color: Colors.white70, fontSize: 11),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildSearchBar() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: TextField(
-        controller: _searchController,
-        onChanged: (v) => setState(() => _searchQuery = v),
-        style: const TextStyle(color: AppTheme.textPrimary),
-        decoration: InputDecoration(
-          hintText: 'بحث في المهام...',
-          prefixIcon: const Icon(Icons.search_rounded,
-              color: AppTheme.textMuted),
-          suffixIcon: _searchQuery.isNotEmpty
-              ? IconButton(
-                  icon: const Icon(Icons.clear_rounded,
-                      color: AppTheme.textMuted),
-                  onPressed: () {
-                    _searchController.clear();
-                    setState(() => _searchQuery = '');
-                  },
-                )
-              : null,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildFilters(int total, int active, int completed) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      child: Row(
-        children: [
-          _filterChip('الكل', TaskFilter.all, total),
-          const SizedBox(width: 8),
-          _filterChip('نشطة', TaskFilter.active, active),
-          const SizedBox(width: 8),
-          _filterChip('مكتملة', TaskFilter.completed, completed),
-        ],
-      ),
-    );
-  }
-
-  Widget _filterChip(String label, TaskFilter filter, int count) {
-    final selected = _filter == filter;
-    return Expanded(
-      child: GestureDetector(
-        onTap: () => setState(() => _filter = filter),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          decoration: BoxDecoration(
-            color: selected ? AppTheme.primary : AppTheme.surfaceAlt,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: selected ? AppTheme.primaryLight : AppTheme.border,
-            ),
-          ),
-          child: Column(
-            children: [
+              const SizedBox(height: 20),
               Text(
-                '$count',
-                style: TextStyle(
-                  color: selected ? Colors.white : AppTheme.textPrimary,
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              Text(
-                label,
-                style: TextStyle(
-                  color: selected ? Colors.white70 : AppTheme.textMuted,
-                  fontSize: 11,
-                ),
+                'أفضل نتيجة: $_highScore',
+                style: const TextStyle(color: Colors.white70, fontSize: 14),
               ),
             ],
           ),
@@ -584,180 +487,350 @@ class _TaskHomePageState extends State<TaskHomePage>
     );
   }
 
-  Widget _buildTaskList(List<Task> visible) {
-    return FadeTransition(
-      opacity: _fadeController,
-      child: ListView.builder(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 100),
-        itemCount: visible.length,
-        itemBuilder: (context, index) {
-          final task = visible[index];
-          return _buildTaskItem(task);
-        },
-      ),
-    );
-  }
-
-  Widget _buildTaskItem(Task task) {
-    return Dismissible(
-      key: ValueKey(task.id),
-      direction: DismissDirection.endToStart,
-      background: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 20),
-        decoration: BoxDecoration(
-          color: AppTheme.danger,
-          borderRadius: BorderRadius.circular(14),
-        ),
-        alignment: Alignment.centerRight,
-        child: const Icon(Icons.delete_rounded,
-            color: Colors.white, size: 26),
-      ),
-      confirmDismiss: (_) async {
-        _deleteTask(task);
-        return false;
-      },
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 250),
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        decoration: BoxDecoration(
-          color: AppTheme.surface,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: task.done
-                ? AppTheme.success.withOpacity(0.4)
-                : AppTheme.border,
-          ),
-        ),
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(14),
-            onTap: () => _toggleTask(task),
-            child: Padding(
-              padding: const EdgeInsets.all(14),
-              child: Row(
-                children: [
-                  AnimatedContainer(
-                    duration: const Duration(milliseconds: 250),
-                    width: 26,
-                    height: 26,
-                    decoration: BoxDecoration(
-                      color: task.done
-                          ? AppTheme.success
-                          : Colors.transparent,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: task.done
-                            ? AppTheme.success
-                            : AppTheme.textMuted,
-                        width: 2,
-                      ),
-                    ),
-                    child: task.done
-                        ? const Icon(Icons.check_rounded,
-                            color: Colors.white, size: 18)
-                        : null,
-                  ),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          task.title,
-                          style: TextStyle(
-                            color: task.done
-                                ? AppTheme.textMuted
-                                : AppTheme.textPrimary,
-                            fontSize: 15,
-                            decoration: task.done
-                                ? TextDecoration.lineThrough
-                                : null,
-                            decorationColor: AppTheme.textMuted,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          _formatDate(task.createdAt),
-                          style: const TextStyle(
-                            color: AppTheme.textMuted,
-                            fontSize: 11,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: 'حذف',
-                    icon: const Icon(Icons.delete_outline_rounded,
-                        color: AppTheme.textMuted),
-                    onPressed: () => _deleteTask(task),
-                  ),
-                ],
+  Widget _buildGameOver() {
+    return Positioned.fill(
+      child: Container(
+        color: Colors.black.withOpacity(0.65),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'انتهت اللعبة',
+                style: TextStyle(
+                  fontSize: 36,
+                  fontWeight: FontWeight.w900,
+                  color: Colors.redAccent,
+                ),
               ),
-            ),
+              const SizedBox(height: 16),
+              Text(
+                'النقاط: ${_score.toInt()}',
+                style: const TextStyle(color: Colors.white, fontSize: 22),
+              ),
+              Text(
+                'العملات: $_coinCount',
+                style: const TextStyle(color: Colors.amber, fontSize: 18),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'أفضل نتيجة: $_highScore',
+                style: const TextStyle(color: Colors.white70, fontSize: 14),
+              ),
+              const SizedBox(height: 32),
+              ElevatedButton(
+                onPressed: _startGame,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.amber,
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 42,
+                    vertical: 16,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(30),
+                  ),
+                ),
+                child: const Text(
+                  'إعادة المحاولة',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
           ),
         ),
       ),
     );
   }
+}
 
-  String _formatDate(DateTime date) {
-    final now = DateTime.now();
-    final diff = now.difference(date);
-    if (diff.inMinutes < 1) return 'الآن';
-    if (diff.inHours < 1) return 'منذ ${diff.inMinutes} دقيقة';
-    if (diff.inDays < 1) return 'منذ ${diff.inHours} ساعة';
-    if (diff.inDays == 1) return 'أمس';
-    return 'منذ ${diff.inDays} يوم';
+class _GamePainter extends CustomPainter {
+  final double trackTop;
+  final double laneHeight;
+  final double screenW;
+  final List<Obstacle> obstacles;
+  final Rect playerRect;
+  final double speed;
+
+  _GamePainter({
+    required this.trackTop,
+    required this.laneHeight,
+    required this.screenW,
+    required this.obstacles,
+    required this.playerRect,
+    required this.speed,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    _paintBackground(canvas, size);
+    _paintLanes(canvas, size);
+    _paintObstacles(canvas);
+    _paintPlayer(canvas);
   }
 
-  Widget _buildEmptyState() {
-    final String message;
-    final IconData icon;
-    if (_searchQuery.isNotEmpty) {
-      message = 'لا توجد نتائج للبحث';
-      icon = Icons.search_off_rounded;
-    } else if (_filter == TaskFilter.completed) {
-      message = 'لا توجد مهام مكتملة بعد';
-      icon = Icons.check_circle_outline_rounded;
-    } else if (_filter == TaskFilter.active) {
-      message = 'كل المهام مكتملة!';
-      icon = Icons.celebration_rounded;
-    } else {
-      message = 'ابدأ بإضافة مهمتك الأولى';
-      icon = Icons.playlist_add_rounded;
+  void _paintBackground(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    final shader = const LinearGradient(
+      begin: Alignment.topCenter,
+      end: Alignment.bottomCenter,
+      colors: [Color(0xFF1B1B3A), Color(0xFF0B0B17)],
+    ).createShader(rect);
+    canvas.drawRect(rect, Paint()..shader = shader);
+  }
+
+  void _paintLanes(Canvas canvas, Size size) {
+    final trackRect = Rect.fromLTWH(0, trackTop, screenW, laneHeight * 3);
+    canvas.drawRect(trackRect, Paint()..color = const Color(0xFF161625));
+
+    final divider = Paint()
+      ..color = Colors.white24
+      ..strokeWidth = 2;
+
+    for (int i = 0; i <= 3; i++) {
+      final y = trackTop + i * laneHeight;
+      canvas.drawLine(Offset(0, y), Offset(screenW, y), divider);
     }
 
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: AppTheme.surfaceAlt,
-              shape: BoxShape.circle,
-              border: Border.all(color: AppTheme.border),
-            ),
-            child: Icon(icon, size: 56, color: AppTheme.primaryLight),
-          ),
-          const SizedBox(height: 20),
-          Text(
-            message,
-            style: const TextStyle(
-              color: AppTheme.textMuted,
-              fontSize: 15,
-            ),
-          ),
-          const SizedBox(height: 6),
-          const Text(
-            'استخدم الزر أدناه للبدء',
-            style: TextStyle(color: AppTheme.textMuted, fontSize: 12),
-          ),
-        ],
-      ),
+    final sleeper = Paint()
+      ..color = const Color(0xFF2A2A44)
+      ..strokeWidth = 3;
+
+    final double offset = (speed * 0.6) % 60;
+    for (int i = 0; i < 3; i++) {
+      final baseY = trackTop + i * laneHeight + laneHeight / 2;
+      for (double x = -offset; x < screenW + 60; x += 60) {
+        canvas.drawLine(
+          Offset(x, baseY - 12),
+          Offset(x + 20, baseY + 12),
+          sleeper,
+        );
+      }
+    }
+  }
+
+  void _paintObstacles(Canvas canvas) {
+    for (final o in obstacles) {
+      if (o.consumed) continue;
+      final rect = _rectFor(o);
+
+      switch (o.kind) {
+        case ObstacleKind.train:
+          _paintTrain(canvas, rect);
+          break;
+        case ObstacleKind.low:
+        case ObstacleKind.high:
+          _paintBarrier(canvas, rect);
+          break;
+        case ObstacleKind.coin:
+          _paintCoin(canvas, rect);
+          break;
+      }
+    }
+  }
+
+  Rect _rectFor(Obstacle o) {
+    final laneTop = trackTop + o.lane * laneHeight;
+    final laneBottom = laneTop + laneHeight;
+
+    switch (o.kind) {
+      case ObstacleKind.low:
+        return Rect.fromLTWH(o.x, laneBottom - o.height, o.width, o.height);
+      case ObstacleKind.high:
+        return Rect.fromLTWH(o.x, laneTop, o.width, o.height);
+      case ObstacleKind.train:
+        return Rect.fromLTWH(o.x, laneTop + 8, o.width, laneHeight - 16);
+      case ObstacleKind.coin:
+        return Rect.fromLTWH(
+          o.x,
+          laneTop + laneHeight / 2 - o.height / 2,
+          o.width,
+          o.height,
+        );
+    }
+  }
+
+  void _paintTrain(Canvas canvas, Rect r) {
+    final bodyPaint = Paint()..color = const Color(0xFFB0332E);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(r, const Radius.circular(8)),
+      bodyPaint,
+    );
+
+    canvas.drawRect(
+      Rect.fromLTWH(r.left, r.top, r.width, 14),
+      Paint()..color = const Color(0xFFD84315),
+    );
+
+    final win = Paint()..color = const Color(0xFF1F1F2E);
+    final winY = r.top + 28;
+    final winH = (r.height - 60).clamp(10.0, r.height);
+    for (int i = 0; i < 2; i++) {
+      final wx = r.left + 8 + i * (r.width / 2);
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(wx, winY, r.width / 2 - 16, winH),
+          const Radius.circular(4),
+        ),
+        win,
+      );
+    }
+
+    canvas.drawRect(
+      Rect.fromLTWH(r.left, r.bottom - 10, r.width, 10),
+      Paint()..color = const Color(0xFF2B2B2B),
     );
   }
+
+  void _paintBarrier(Canvas canvas, Rect r) {
+    canvas.save();
+    canvas.clipRRect(
+      RRect.fromRectAndRadius(r, const Radius.circular(4)),
+    );
+    canvas.drawRect(r, Paint()..color = const Color(0xFFFFC107));
+
+    final stripe = Paint()
+      ..color = Colors.black
+      ..strokeWidth = 8;
+
+    for (double x = r.left - r.height; x < r.right + r.height; x += 18) {
+      canvas.drawLine(
+        Offset(x, r.top),
+        Offset(x + r.height, r.bottom),
+        stripe,
+      );
+    }
+    canvas.restore();
+
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(r, const Radius.circular(4)),
+      Paint()
+        ..color = Colors.black54
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+  }
+
+  void _paintCoin(Canvas canvas, Rect r) {
+    final center = r.center;
+    final radius = r.width / 2;
+
+    canvas.drawCircle(
+      center,
+      radius,
+      Paint()..color = const Color(0xFFFFC107),
+    );
+    canvas.drawCircle(
+      center,
+      radius * 0.7,
+      Paint()..color = const Color(0xFFFFE082),
+    );
+    canvas.drawCircle(
+      center,
+      radius,
+      Paint()
+        ..color = const Color(0xFFB8860B)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+  }
+
+  void _paintPlayer(Canvas canvas) {
+    final r = playerRect;
+
+    final shadowCenter = Offset(r.center.dx, r.bottom + 4);
+    canvas.drawOval(
+      Rect.fromCenter(
+        center: shadowCenter,
+        width: r.width * 0.9,
+        height: 10,
+      ),
+      Paint()..color = Colors.black.withOpacity(0.35),
+    );
+
+    final bodyTop = r.top + r.height * 0.28;
+    final bodyRect = Rect.fromLTWH(
+      r.left + 6,
+      bodyTop,
+      r.width - 12,
+      r.height * 0.52,
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(bodyRect, const Radius.circular(8)),
+      Paint()..color = const Color(0xFF2E6BFF),
+    );
+
+    canvas.drawRect(
+      Rect.fromLTWH(
+        bodyRect.left + 4,
+        bodyRect.top + 4,
+        bodyRect.width - 8,
+        6,
+      ),
+      Paint()..color = Colors.white24,
+    );
+
+    final legY = bodyRect.bottom;
+    final legH = (r.bottom - legY).clamp(0.0, r.height);
+    final legW = r.width * 0.22;
+    final legPaint = Paint()..color = const Color(0xFF1F1F2E);
+
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(r.left + r.width * 0.18, legY, legW, legH),
+        const Radius.circular(4),
+      ),
+      legPaint,
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(r.right - r.width * 0.18 - legW, legY, legW, legH),
+        const Radius.circular(4),
+      ),
+      legPaint,
+    );
+
+    final headR = r.width * 0.32;
+    final headCenter = Offset(r.center.dx, r.top + headR);
+    canvas.drawCircle(
+      headCenter,
+      headR,
+      Paint()..color = const Color(0xFFEFC39B),
+    );
+
+    final capPaint = Paint()..color = const Color(0xFFE53935);
+    canvas.drawArc(
+      Rect.fromCenter(
+        center: Offset(headCenter.dx, headCenter.dy - headR * 0.5),
+        width: headR * 2.2,
+        height: headR * 1.1,
+      ),
+      3.14159,
+      3.14159,
+      true,
+      capPaint,
+    );
+    canvas.drawRect(
+      Rect.fromLTWH(
+        headCenter.dx - headR * 1.1,
+        headCenter.dy - headR * 0.55,
+        headR * 2.2,
+        headR * 0.35,
+      ),
+      capPaint,
+    );
+
+    canvas.drawRect(
+      Rect.fromLTWH(
+        headCenter.dx,
+        headCenter.dy - headR * 0.3,
+        headR * 1.4,
+        4,
+      ),
+      Paint()..color = const Color(0xFFB71C1C),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _GamePainter old) => true;
 }
